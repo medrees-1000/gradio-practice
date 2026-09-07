@@ -67,6 +67,20 @@ Before proposing a PR, check for overlapping open PRs and issue ownership.
 - Pure code-agent PRs are not allowed. A human contributor must understand and be able to defend the change.
 - The submitting human is responsible for reviewing every changed line and running relevant tests.
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub Issues on this repo (`medrees-1000/gradio-practice`), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the five default canonical triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Multi-context layout: a root `CONTEXT-MAP.md` points to per-context `CONTEXT.md` files for `gradio/` (backend), `js/` (frontend), `client/python/`, and `client/js/`. See `docs/agents/domain.md`.
+
 ## More Details
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup instructions, testing details, and the contribution workflow.
