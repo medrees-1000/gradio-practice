@@ -1,0 +1,82 @@
+<script module>
+	import { defineMeta } from "@storybook/addon-svelte-csf";
+	import HighlightedText from "./Index.svelte";
+	import { wrapProps } from "../storybook/wrapProps";
+
+	const { Story } = defineMeta({
+		title: "Components/HighlightedText",
+		component: HighlightedText
+	});
+
+	const defaultValue = [
+		{ token: "zebras", class_or_confidence: "+" },
+		{ token: "dogs", class_or_confidence: "-" },
+		{ token: "elephants", class_or_confidence: "+" }
+	];
+</script>
+
+{#snippet template(args)}
+	<HighlightedText {...wrapProps(args)} />
+{/snippet}
+
+{#snippet templateWithDefault(args)}
+	<HighlightedText {...wrapProps({ value: defaultValue, ...args })} />
+{/snippet}
+
+<Story
+	name="Highlighted Text Default"
+	args={{}}
+	template={templateWithDefault}
+/>
+<Story
+	name="Highlighted Text with legend"
+	args={{ show_legend: true }}
+	template={templateWithDefault}
+/>
+<Story
+	name="Highlighted Text with color map"
+	args={{ color_map: { "+": "green", "-": "red" } }}
+	template={templateWithDefault}
+/>
+<Story
+	name="Highlighted Text with combine adjacent"
+	args={{
+		value: [
+			{ token: "The", class_or_confidence: null },
+			{ token: "quick", class_or_confidence: "adjective" },
+			{ token: " sneaky", class_or_confidence: "adjective" },
+			{ token: "fox", class_or_confidence: "subject" },
+			{ token: " jumped ", class_or_confidence: "past tense verb" },
+			{ token: "over the", class_or_confidence: null },
+			{ token: "lazy dog", class_or_confidence: "object" }
+		],
+		combine_adjacent: true
+	}}
+	{template}
+/>
+<Story
+	name="Highlighted Text in scores mode"
+	args={{
+		value: [
+			{ token: "the", class_or_confidence: -1 },
+			{ token: "quick", class_or_confidence: 1 },
+			{ token: "fox", class_or_confidence: 0.3 }
+		],
+		show_legend: true
+	}}
+	{template}
+/>
+<Story
+	name="Highlighted Text with RTL"
+	args={{
+		label: "مرحبا بالعالم",
+		value: [
+			{ token: "مرحبا", class_or_confidence: "greeting" },
+			{ token: " ", class_or_confidence: null },
+			{ token: "بالعالم", class_or_confidence: "subject" }
+		],
+		rtl: true,
+		color_map: { greeting: "green", subject: "blue" }
+	}}
+	{template}
+/>

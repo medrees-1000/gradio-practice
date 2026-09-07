@@ -1,0 +1,1003 @@
+<script module lang="ts">
+	import type { Tool, Subtool } from "./Toolbar.svelte";
+
+	export const EDITOR_KEY = Symbol("editor");
+	export type context_type = "bg" | "layers" | "crop" | "draw" | "erase";
+</script>
+
+<script lang="ts">
+	import { onMount, tick, type Snippet } from "svelte";
+	import { get } from "svelte/store";
+	import Toolbar, { type Tool as ToolbarTool } from "./Toolbar.svelte";
+	import { CropTool } from "./crop/crop";
+	import { ResizeTool } from "./resize/resize";
+	import { Webcam } from "@gradio/image";
+	import type { I18nFormatter } from "@gradio/utils";
+	import type { Client, FileData } from "@gradio/client";
+	import tinycolor, { type ColorInput } from "tinycolor2";
+	import { ZoomTool } from "./zoom/zoom";
+	import { type CommandManager, type CommandNode } from "./core/commands";
+	import { ImageEditor } from "./core/editor";
+	import { type Brush, type Eraser } from "./brush/types";
+	import { BrushTool } from "./brush/brush";
+	import { create_drag } from "@gradio/upload";
+	import SecondaryToolbar from "./SecondaryToolbar.svelte";
+	import { Check } from "@gradio/icons";
+	import type { LayerOptions, Source, Transform, WebcamOptions } from "./types";
+
+	import { type ImageBlobs } from "./types";
+	import Controls from "./Controls.svelte";
+	import IconButton from "./IconButton.svelte";
+
+	const { drag, open_file_upload } = create_drag();
+
+	export const antialias = true;
+
+	let {
+		changeable = false,
+		sources = ["upload", "webcam", "clipboard"],
+		transforms = ["crop", "resize"],
+		canvas_size,
+		is_dragging = $bindable(false),
+		background_image = $bindable(false),
+		brush_options,
+		eraser_options,
+		fixed_canvas = false,
+		root,
+		i18n,
+		upload,
+		composite,
+		layers,
+		background,
+		border_region = 0,
+		layer_options,
+		current_tool = $bindable(),
+		webcam_options,
+		show_download_button = false,
+		theme_mode,
+		full_history = $bindable(null),
+		has_drawn = $bindable(false),
+		can_undo = $bindable(false),
+		has_user_edits = $bindable(false),
+		onclear,
+		onsave,
+		onchange,
+		onupload,
+		oninput,
+		ondownload_error,
+		children
+	}: {
+		changeable?: boolean;
+		sources?: Source[];
+		transforms?: Transform[];
+		canvas_size: [number, number];
+		is_dragging?: boolean;
+		background_image?: boolean;
+		brush_options: Brush | false;
+		eraser_options: Eraser | false;
+		fixed_canvas?: boolean;
+		root: string;
+		i18n: I18nFormatter;
+		upload: Client["upload"];
+		composite: FileData | null;
+		layers: FileData[];
+		background: FileData | null;
+		border_region?: number;
+		layer_options: LayerOptions;
+		current_tool: ToolbarTool;
+		webcam_options: WebcamOptions;
+		show_download_button?: boolean;
+		theme_mode: "dark" | "light";
+		full_history?: CommandNode | null;
+		has_drawn?: boolean;
+		can_undo?: boolean;
+		has_user_edits?: boolean;
+		onclear?: () => void;
+		onsave?: () => void;
+		onchange?: () => void;
+		onupload?: () => void;
+		oninput?: () => void;
+		ondownload_error?: (error: string) => void;
+		children?: Snippet;
+	} = $props();
+
+	let pixi_target: HTMLDivElement;
+	let pixi_target_crop: HTMLDivElement;
+
+	let layer_options_key: string | undefined | null = null;
+	$effect(() => {
+		if (!check_if_should_init()) return;
+
+		const next_layer_options_key = JSON.stringify(layer_options);
+		if (next_layer_options_key === layer_options_key) return;
+
+		layer_options_key = next_layer_options_key;
+		editor.set_layer_options(layer_options);
+	});
+
+	$effect(() => {
+		refresh_tools();
+	});
+
+	function refresh_tools(): void {
+		if (!editor || !ready) return;
+		editor.set_tool(current_tool);
+		editor.set_subtool(current_subtool);
+	}
+
+	$effect(() => {
+		if (!(editor && ready && editor.layers)) return;
+		const current_layers = get(editor.layers);
+
+		if (current_layers.layers.length > 0 && !current_layers.active_layer) {
+			refresh_tools_for_layer_changes(current_layers);
+		}
+	});
+
+	/**
+	 * Refreshes tools when layer state changes
+	 */
+	function refresh_tools_for_layer_changes(current_layers: any): void {
+		if (!editor || !ready) return;
+
+		if (current_layers.layers.length > 0 && !current_layers.active_layer) {
+			editor.set_layer(current_layers.layers[0].id);
+		}
+
+		// reapply current tool to ensure it targets the correct layer
+		if (current_tool) {
+			editor.set_tool(current_tool);
+			if (current_subtool) {
+				editor.set_subtool(current_subtool);
+			}
+		}
+
+		if (brush && (current_tool === "draw" || current_tool === "erase")) {
+			brush.set_tool(current_tool, current_subtool);
+		}
+	}
+
+	function check_if_should_init(): boolean {
+		return layer_options && editor && ready;
+	}
+
+	/**
+	 * Gets the image blobs from the editor
+	 * @returns {Promise<ImageBlobs>} Object containing background, layers, and composite image blobs
+	 */
+	export async function get_blobs(): Promise<ImageBlobs> {
+		if (!editor) return { background: null, layers: [], composite: null };
+		if (!background_image && !has_drawn && !layers.length)
+			return { background: null, layers: [], composite: null };
+		const blobs = await editor.get_blobs();
+		return blobs;
+	}
+
+	let editor: ImageEditor;
+
+	/**
+	 * Adds an image to the editor
+	 * @param {Blob | File} image - The image to add
+	 */
+	export function add_image(image: Blob | File): void {
+		editor.add_image({ image });
+	}
+
+	let pending_bg: Promise<void>;
+	let loading_value = 0;
+	/**
+	 * Adds an image to the editor from a URL
+	 * @param {string | FileData} source - The URL of the image or a FileData object
+	 * @returns {Promise<void>}
+	 */
+	export async function add_image_from_url(
+		source:
+			| string
+			| {
+					url: string;
+					meta: {
+						_type: string;
+					};
+			  }
+			| any
+	): Promise<void> {
+		if (!editor || !source || !check_if_should_init()) return;
+		has_user_edits = false;
+		loading_value += 1;
+		let url: string;
+
+		if (typeof source === "string") {
+			url = source;
+		} else if (source?.meta?._type === "gradio.FileData" && source?.url) {
+			url = source.url;
+		} else {
+			console.warn("Invalid source provided to add_image_from_url:", source);
+			loading_value -= 1;
+			return;
+		}
+
+		try {
+			pending_bg = editor.add_image_from_url(url);
+			let pending_crop = crop.add_image_from_url(url);
+			await Promise.all([pending_bg, pending_crop]);
+			crop.set_tool("image");
+			crop.set_subtool("crop");
+			background_image = true;
+			zoom.set_zoom("fit");
+			onupload?.();
+			oninput?.();
+		} catch (error) {
+			console.error("Error adding image from URL:", error);
+		} finally {
+			loading_value -= 1;
+		}
+	}
+
+	/**
+	 * Adds a new layer with an image loaded from a URL
+	 * @param {string | FileData} source - The URL of the image or a FileData object
+	 * @returns {Promise<string | null>} - The ID of the created layer, or null if failed
+	 */
+	export async function add_layers_from_url(
+		source: FileData[] | any
+	): Promise<void> {
+		if (!editor || !source.length || !check_if_should_init()) return;
+		has_user_edits = false;
+		loading_value += 1;
+
+		try {
+			if (
+				Array.isArray(source) &&
+				source.every((item) => item?.meta?._type === "gradio.FileData")
+			) {
+				await pending_bg;
+				await editor.add_layers_from_url(source.map((item) => item.url));
+				onchange?.();
+				oninput?.();
+			}
+		} catch (error) {
+			console.error("Error adding layer from URL:", error);
+		} finally {
+			loading_value -= 1;
+		}
+	}
+
+	let brush: BrushTool;
+	let zoom: ZoomTool;
+	let zoom_level = $state(1);
+	let ready = $state(false);
+	let mounted = $state(false);
+	let min_zoom = $state(true);
+
+	let last_dimensions = { width: 0, height: 0 };
+
+	/**
+	 * Handles visibility changes and resets zoom if dimensions have changed
+	 */
+	async function handle_visibility_change(): Promise<void> {
+		if (!editor || !ready || !zoom || !pixi_target) return;
+		await tick();
+
+		if (!pixi_target) return;
+
+		const is_visible = pixi_target.offsetParent !== null;
+
+		if (is_visible) {
+			const current_dimensions = pixi_target.getBoundingClientRect();
+
+			if (
+				current_dimensions.width !== last_dimensions.width ||
+				current_dimensions.height !== last_dimensions.height
+			) {
+				zoom.set_zoom("fit");
+
+				last_dimensions = {
+					width: current_dimensions.width,
+					height: current_dimensions.height
+				};
+			}
+		}
+	}
+
+	onMount(() => {
+		let intersection_observer: IntersectionObserver;
+		let resize_observer: ResizeObserver;
+
+		init_image_editor().then(() => {
+			mounted = true;
+			intersection_observer = new IntersectionObserver(() => {
+				handle_visibility_change();
+			});
+
+			resize_observer = new ResizeObserver(() => {
+				handle_visibility_change();
+			});
+
+			intersection_observer.observe(pixi_target);
+			resize_observer.observe(pixi_target);
+
+			setTimeout(() => {
+				if (full_history && editor) {
+					editor.command_manager
+						.replay(full_history, editor.context)
+						.then(() => {
+							refresh_tools_after_history();
+						});
+				}
+			}, 0);
+		});
+
+		if (typeof window !== "undefined") {
+			(window as any).editor = editor;
+		}
+
+		return () => {
+			if (intersection_observer) {
+				intersection_observer.disconnect();
+			}
+			if (resize_observer) {
+				resize_observer.disconnect();
+			}
+			if (editor) {
+				editor.destroy();
+			}
+		};
+	});
+
+	/**
+	 * Refreshes tool state after history replay to ensure proper layer targeting
+	 */
+	function refresh_tools_after_history(): void {
+		if (!editor || !ready) return;
+
+		const current_layers = get(editor.layers);
+
+		if (current_layers.layers.length > 0 && !current_layers.active_layer) {
+			editor.set_layer(current_layers.layers[0].id);
+		}
+
+		if (current_tool) {
+			editor.set_tool(current_tool);
+			if (current_subtool) {
+				editor.set_subtool(current_subtool);
+			}
+		}
+
+		if (brush && (current_tool === "draw" || current_tool === "erase")) {
+			brush.set_tool(current_tool, current_subtool);
+		}
+
+		full_history = editor.command_manager.history;
+	}
+
+	let crop: ImageEditor;
+	let crop_zoom: ZoomTool;
+	let can_redo = $state(false);
+	async function init_image_editor(): Promise<void> {
+		brush = new BrushTool();
+		zoom = new ZoomTool();
+		editor = new ImageEditor({
+			target_element: pixi_target,
+			width: canvas_size[0],
+			height: canvas_size[1],
+			tools: ["image", zoom, new ResizeTool(), brush],
+			fixed_canvas,
+			border_region,
+			layer_options,
+			theme_mode
+		});
+
+		brush.on("change", () => {
+			has_drawn = true;
+		});
+
+		crop_zoom = new ZoomTool();
+
+		crop = new ImageEditor({
+			target_element: pixi_target_crop,
+			width: canvas_size[0],
+			height: canvas_size[1],
+			tools: ["image", crop_zoom, new CropTool()],
+			dark: true,
+			fixed_canvas: false,
+			border_region: 0,
+			pad_bottom: 40
+		});
+
+		editor.scale.subscribe((_scale) => {
+			zoom_level = _scale;
+		});
+
+		editor.min_zoom.subscribe((is_min_zoom) => {
+			min_zoom = is_min_zoom;
+		});
+
+		editor.dimensions.subscribe((dimensions) => {
+			last_dimensions = { ...dimensions };
+		});
+
+		editor.command_manager.current_history.subscribe((history) => {
+			can_undo = history.previous !== null;
+			can_redo = history.next !== null;
+		});
+
+		await Promise.all([editor.ready, crop.ready]).then(() => {
+			handle_tool_change({ tool: "image" });
+			ready = true;
+			if (sources.length > 0) {
+				handle_tool_change({ tool: "image" });
+			} else if (brush_options) {
+				handle_tool_change({ tool: "draw" });
+			} else if (eraser_options) {
+				handle_tool_change({ tool: "erase" });
+			} else {
+				handle_tool_change({ tool: "image" });
+			}
+			crop.set_subtool("crop");
+		});
+
+		editor.on("change", () => {
+			if (loading_value === 0) has_user_edits = true;
+			onchange?.();
+			oninput?.();
+			full_history = editor.command_manager.history;
+		});
+
+		if (background || layers.length > 0) {
+			if (background) {
+				await add_image_from_url(background);
+			}
+			if (layers.length > 0) {
+				await add_layers_from_url(layers);
+			}
+			handle_tool_change({ tool: "draw" });
+		} else if (composite) {
+			await add_image_from_url(composite);
+			handle_tool_change({ tool: "draw" });
+		}
+
+		refresh_tools();
+	}
+
+	$effect(() => {
+		if (
+			background == null &&
+			layers.length == 0 &&
+			composite == null &&
+			editor &&
+			ready
+		) {
+			editor.reset_canvas();
+			zoom.set_zoom("fit");
+			handle_tool_change({ tool: "image" });
+			background_image = false;
+			has_drawn = false;
+		}
+	});
+
+	$effect(() => {
+		if (current_tool === "image" && current_subtool === "crop") {
+			crop_zoom.set_zoom("fit");
+		}
+	});
+
+	/**
+	 * Handles file uploads
+	 * @param {File[]} files - The uploaded files
+	 */
+	async function handle_files(
+		files: File[] | Blob[] | File | Blob | null
+	): Promise<void> {
+		if (files == null) return;
+		if (!sources.includes("upload")) return;
+		editor.reset_canvas();
+		const _file = Array.isArray(files) ? files[0] : files;
+		await editor.add_image({ image: _file });
+		await crop.add_image({ image: _file });
+		crop.reset();
+
+		background_image = true;
+		zoom.set_zoom("fit");
+		handle_tool_change({ tool: "draw" });
+		onupload?.();
+	}
+
+	$effect(() => {
+		if (editor) {
+			background_image =
+				can_undo && editor.command_manager.contains("AddImage");
+		}
+	});
+
+	/**
+	 * Handles tool change events
+	 * @param {{ tool: ToolbarTool }} param0 - Object containing the selected tool
+	 */
+	function handle_tool_change({ tool }: { tool: ToolbarTool }): void {
+		editor.set_tool(tool);
+		current_tool = tool;
+
+		if (tool === "image") {
+			crop.set_tool("image");
+			crop.set_subtool("crop");
+		}
+	}
+
+	/**
+	 * Handles subtool change events
+	 * @param {{ tool: ToolbarTool, subtool: Subtool }} param0 - Object containing the selected tool and subtool
+	 */
+	function handle_subtool_change({
+		tool,
+		subtool
+	}: {
+		tool: ToolbarTool;
+		subtool: Subtool | null;
+	}): void {
+		editor.set_subtool(subtool);
+		current_subtool = subtool;
+
+		if (subtool === null) {
+			return;
+		}
+
+		if (tool === "draw") {
+			if (subtool === "size") {
+				brush_size_visible = true;
+			} else if (subtool === "color") {
+				brush_color_visible = true;
+			}
+		}
+
+		if (tool === "erase" && subtool === "size") {
+			eraser_size_visible = true;
+		}
+
+		if (tool === "image" && subtool === "paste") {
+			process_clipboard();
+		}
+
+		if (tool === "image" && subtool === "upload") {
+			tick().then(() => {
+				disable_click = false;
+				open_file_upload();
+			});
+		}
+	}
+
+	let eraser_size_visible = $state(false);
+	let selected_color = $state<ColorInput | string>();
+	let selected_size = $state<number>();
+	let selected_opacity = $state(1);
+	let selected_eraser_size = $state<number>();
+
+	$effect(() => {
+		if (brush_options) {
+			update_brush_options();
+		}
+
+		if (eraser_options) {
+			update_eraser_options();
+		}
+	});
+
+	function update_brush_options(): void {
+		if (!brush_options) return;
+		const options = brush_options;
+		const default_color =
+			options.default_color === "auto"
+				? options.colors[0]
+				: options.default_color;
+
+		// color is already a tuple [color, opacity]
+		if (Array.isArray(default_color)) {
+			selected_color = default_color[0];
+			selected_opacity = default_color[1];
+		} else {
+			selected_color = default_color;
+
+			// color is a string, check if it has opacity info
+			const color = tinycolor(default_color);
+			if (color.getAlpha() < 1) {
+				selected_opacity = color.getAlpha();
+			} else {
+				selected_opacity = 1;
+			}
+		}
+
+		selected_size =
+			typeof options.default_size === "number" ? options.default_size : 25;
+	}
+
+	function update_eraser_options(): void {
+		if (!eraser_options) return;
+		const options = eraser_options;
+		selected_eraser_size =
+			options.default_size === "auto" ? 25 : options.default_size;
+	}
+
+	let brush_size_visible = $state(false);
+
+	let brush_color_visible = $state(false);
+
+	$effect(() => {
+		if (!brush) return;
+		brush.set_brush_color(
+			(() => {
+				let color_value: ColorInput = "black";
+				if (selected_color === "auto") {
+					if (!brush_options) return "black";
+					const default_color =
+						brush_options.colors.find((color) =>
+							Array.isArray(color)
+								? color[0] === brush_options.default_color
+								: color === brush_options.default_color
+						) || brush_options.colors[0];
+
+					color_value = Array.isArray(default_color)
+						? default_color[0]
+						: default_color;
+				} else {
+					color_value = selected_color ?? "black";
+				}
+				return color_value;
+			})()
+		);
+	});
+
+	$effect(() => {
+		brush?.set_brush_size(
+			typeof selected_size === "number" ? selected_size : 25
+		);
+	});
+
+	$effect(() => {
+		brush?.set_eraser_size(
+			typeof selected_eraser_size === "number" ? selected_eraser_size : 25
+		);
+	});
+
+	let disable_click = $state(true);
+	$effect(() => {
+		disable_click =
+			current_tool !== "image" ||
+			(current_tool === "image" && background_image) ||
+			(current_tool === "image" && current_subtool === "webcam") ||
+			!sources.includes("upload");
+	});
+
+	let current_subtool = $state<Subtool | null>(null);
+	let preview = $state(false);
+	$effect(() => {
+		brush?.preview_brush(preview);
+	});
+	$effect(() => {
+		brush?.set_brush_opacity(selected_opacity);
+	});
+
+	function remove_image(): void {
+		onclear?.();
+		editor.reset_canvas();
+		handle_tool_change({ tool: "image" });
+		background_image = false;
+		has_drawn = false;
+	}
+
+	export function handle_remove(): void {
+		remove_image();
+	}
+
+	function handle_zoom_change(zoom_level: number | "fit"): void {
+		zoom.set_zoom(zoom_level);
+	}
+
+	function zoom_in_out(direction: "in" | "out"): void {
+		zoom.set_zoom(
+			direction === "in"
+				? zoom_level + (zoom_level < 1 ? 0.1 : zoom_level * 0.1)
+				: zoom_level - (zoom_level < 1 ? 0.1 : zoom_level * 0.1)
+		);
+	}
+
+	async function process_clipboard(): Promise<void> {
+		const items = await navigator.clipboard.read();
+
+		for (let i = 0; i < items.length; i++) {
+			const type = items[i].types.find((t) => t.startsWith("image/"));
+			if (type) {
+				const blob = await items[i].getType(type);
+
+				handle_files(blob);
+			}
+		}
+	}
+
+	function handle_capture(value: FileData | Blob | null): void {
+		if (value !== null) {
+			handle_files(value as Blob);
+		}
+		handle_subtool_change({ tool: current_tool, subtool: null });
+	}
+
+	function handle_save(): void {
+		onsave?.();
+	}
+
+	$effect(() => {
+		add_image_from_url(composite || background);
+	});
+	$effect(() => {
+		add_layers_from_url(layers);
+	});
+
+	async function handle_crop_confirm(): Promise<void> {
+		const { image } = await crop.get_crop_bounds();
+		if (!image) return;
+
+		await editor.add_image({
+			image,
+			resize: false
+		});
+		handle_subtool_change({ tool: "image", subtool: null });
+		onchange?.();
+		oninput?.();
+	}
+
+	async function handle_download(): Promise<void> {
+		const blobs = await editor.get_blobs();
+
+		const blob = blobs.composite;
+		if (!blob) {
+			ondownload_error?.("Unable to generate image to download.");
+			return;
+		}
+		const url = URL.createObjectURL(blob);
+		const link = document.createElement("a");
+		link.href = url;
+		link.download = "image.png";
+		link.click();
+		URL.revokeObjectURL(url);
+	}
+
+	function handle_undo(): void {
+		editor.undo();
+	}
+
+	function handle_redo(): void {
+		editor.redo();
+	}
+
+	let old_background = background;
+
+	$effect(() => {
+		if (old_background === background) return;
+		handle_tool_change({ tool: "draw" });
+		handle_subtool_change({ tool: "draw", subtool: null });
+		current_tool = "draw";
+		old_background = background;
+	});
+</script>
+
+<div
+	data-testid="image"
+	class="image-container"
+	class:dark-bg={current_subtool === "crop"}
+	use:drag={{
+		on_drag_change: (dragging) => (is_dragging = dragging),
+		on_files: handle_files,
+		accepted_types: "image/*",
+		disable_click: disable_click,
+		ignore_click_selector: ".toolbar-wrap"
+	}}
+	aria-label={"Click to upload or drop files"}
+	aria-dropeffect="copy"
+>
+	{#if ready}
+		{#if current_subtool !== "crop"}
+			<Controls
+				{i18n}
+				{changeable}
+				onset_zoom={(zoom) => handle_zoom_change(zoom)}
+				onzoom_in={() => zoom_in_out("in")}
+				onzoom_out={() => zoom_in_out("out")}
+				{min_zoom}
+				current_zoom={zoom_level}
+				onremove_image={remove_image}
+				tool={current_tool}
+				can_save={true}
+				onsave={handle_save}
+				onpan={() => {
+					handle_tool_change({ tool: "pan" });
+				}}
+				enable_download={show_download_button}
+				ondownload={() => handle_download()}
+				{can_undo}
+				{can_redo}
+				onundo={handle_undo}
+				onredo={handle_redo}
+			/>
+		{/if}
+
+		{#if current_subtool !== "crop"}
+			<Toolbar
+				{i18n}
+				{sources}
+				{transforms}
+				background={background_image}
+				ontool_change={(detail) => handle_tool_change(detail)}
+				onsubtool_change={(detail) => handle_subtool_change(detail)}
+				show_brush_size={brush_size_visible}
+				show_brush_color={brush_color_visible}
+				show_eraser_size={eraser_size_visible}
+				{brush_options}
+				{eraser_options}
+				bind:selected_color
+				bind:selected_size
+				bind:selected_eraser_size
+				bind:selected_opacity
+				bind:preview
+				tool={current_tool}
+				subtool={current_subtool}
+			/>
+		{/if}
+
+		{#if current_tool === "image" && current_subtool === "webcam"}
+			<div class="modal">
+				<div class="modal-inner">
+					<Webcam
+						{upload}
+						{root}
+						oncapture={handle_capture}
+						streaming={false}
+						mode="image"
+						include_audio={false}
+						{i18n}
+						mirror_webcam={webcam_options.mirror}
+						webcam_constraints={webcam_options.constraints}
+					/>
+				</div>
+			</div>
+		{/if}
+
+		{#if current_subtool !== "crop" && !layer_options.disabled}
+			<SecondaryToolbar
+				{i18n}
+				enable_additional_layers={layer_options.allow_additional_layers}
+				layers={editor.layers}
+				onnew_layer={() => {
+					editor.add_layer();
+				}}
+				onchange_layer={(id) => {
+					editor.set_layer(id);
+					if (current_tool === "draw") {
+						handle_tool_change({ tool: "draw" });
+					}
+				}}
+				onmove_layer={({ id, direction }) => {
+					editor.move_layer(id, direction);
+				}}
+				ondelete_layer={(id) => {
+					editor.delete_layer(id);
+				}}
+				ontoggle_layer_visibility={(id) => {
+					editor.toggle_layer_visibility(id);
+				}}
+			/>
+		{/if}
+	{/if}
+	<div
+		class="pixi-target"
+		class:visible={current_subtool !== "crop"}
+		bind:this={pixi_target}
+	></div>
+	<div
+		class="pixi-target-crop"
+		class:visible={current_subtool === "crop"}
+		bind:this={pixi_target_crop}
+	></div>
+
+	{#if current_subtool === "crop"}
+		<div class="crop-confirm-button">
+			<IconButton
+				Icon={Check}
+				label={i18n("image_editor.confirm_crop")}
+				show_label={true}
+				size="large"
+				padded={true}
+				color="white"
+				background="var(--color-green-500)"
+				label_position="right"
+				onclick={handle_crop_confirm}
+			/>
+		</div>
+	{/if}
+	{#if children}{@render children()}{/if}
+</div>
+
+<style>
+	.image-container {
+		display: flex;
+		height: 100%;
+		flex-direction: column;
+		justify-content: center;
+		align-items: center;
+		max-height: 100%;
+		border-radius: var(--radius-sm);
+	}
+
+	.pixi-target {
+		width: 100%;
+		height: 100%;
+		position: absolute;
+		top: 0;
+		left: 0;
+		z-index: 1;
+		display: block;
+		opacity: 0;
+		pointer-events: none;
+		border-radius: var(--radius-sm);
+	}
+
+	.pixi-target-crop {
+		width: 100%;
+		height: 100%;
+		position: absolute;
+		top: 0;
+		left: 0;
+		z-index: 2;
+		display: block;
+		opacity: 0;
+		pointer-events: none;
+		border-radius: var(--radius-sm);
+	}
+
+	.visible {
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	.pixi-target {
+		width: 100%;
+		height: 100%;
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		overflow: hidden;
+	}
+
+	.modal {
+		position: absolute;
+		height: 100%;
+		width: 100%;
+		left: 0;
+		right: 0;
+		margin: auto;
+		z-index: var(--layer-top);
+		display: flex;
+		align-items: center;
+	}
+
+	.modal-inner {
+		height: 100%;
+		width: 100%;
+		background: var(--block-background-fill);
+	}
+
+	.dark-bg {
+		background: #333;
+	}
+
+	.crop-confirm-button {
+		position: absolute;
+		bottom: 8px;
+		left: 0;
+		right: 0;
+		margin: auto;
+		z-index: var(--layer-top);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+</style>
