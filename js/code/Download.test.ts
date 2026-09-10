@@ -98,13 +98,14 @@ describe("Download: link structure", () => {
 		expect(link.getAttribute("href")).toMatch(/^blob:/);
 	});
 
-	test("download link is visible", async () => {
+	test("download link exists in the DOM but is hidden until the code block is hovered or focused", async () => {
 		const { container } = await render(Code, {
 			...base_props,
 			language: "python"
 		});
 		const link = get_download_link(container);
-		expect(link).toBeVisible();
+		expect(link).toBeInTheDocument();
+		expect(link).not.toBeVisible();
 	});
 
 	test("download link contains a button with label 'Download'", async () => {

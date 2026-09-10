@@ -21,6 +21,9 @@
 
 	let dark_mode = gradio.shared.theme === "dark";
 
+	let hovering = $state(false);
+	let focused_within = $state(false);
+
 	let label = $derived(gradio.shared.label || gradio.i18n("code.code"));
 	// gr.Code() with no value serializes to `undefined`. Svelte 5 forbids
 	// `bind:value={undefined}` when the child's `value` prop has a fallback
@@ -61,42 +64,52 @@
 			gradio.dispatch("clear_status", gradio.shared.loading_status)}
 	/>
 
-	{#if gradio.shared.show_label}
-		<BlockLabel
-			Icon={CodeIcon}
-			show_label={gradio.shared.show_label}
-			{label}
-			float={false}
-		/>
-	{/if}
+	<div
+		class="code-container"
+		data-testid="code-container"
+		onmouseenter={() => (hovering = true)}
+		onmouseleave={() => (hovering = false)}
+		onfocusin={() => (focused_within = true)}
+		onfocusout={() => (focused_within = false)}
+	>
+		{#if gradio.shared.show_label}
+			<BlockLabel
+				Icon={CodeIcon}
+				show_label={gradio.shared.show_label}
+				{label}
+				float={false}
+			/>
+		{/if}
 
-	{#if !gradio.props.value && !gradio.shared.interactive}
-		<Empty unpadded_box={true} size="large">
-			<CodeIcon />
-		</Empty>
-	{:else}
-		<Widget
-			language={gradio.props.language}
-			value={gradio.props.value}
-			buttons={gradio.props.buttons ?? ["copy", "download"]}
-			on_custom_button_click={(id) => {
-				gradio.dispatch("custom_button_click", { id });
-			}}
-		/>
+		{#if !gradio.props.value && !gradio.shared.interactive}
+			<Empty unpadded_box={true} size="large">
+				<CodeIcon />
+			</Empty>
+		{:else}
+			<Widget
+				language={gradio.props.language}
+				value={gradio.props.value}
+				buttons={gradio.props.buttons ?? ["copy", "download"]}
+				revealed={hovering || focused_within}
+				on_custom_button_click={(id) => {
+					gradio.dispatch("custom_button_click", { id });
+				}}
+			/>
 
-		<Code
-			bind:value={gradio.props.value}
-			language={gradio.props.language}
-			lines={gradio.props.lines}
-			max_lines={gradio.props.max_lines}
-			{dark_mode}
-			wrap_lines={gradio.props.wrap_lines}
-			show_line_numbers={gradio.props.show_line_numbers}
-			autocomplete={gradio.props.autocomplete}
-			readonly={!gradio.shared.interactive}
-			onblur={() => gradio.dispatch("blur")}
-			onfocus={() => gradio.dispatch("focus")}
-			oninput={() => gradio.dispatch("input")}
-		/>
-	{/if}
+			<Code
+				bind:value={gradio.props.value}
+				language={gradio.props.language}
+				lines={gradio.props.lines}
+				max_lines={gradio.props.max_lines}
+				{dark_mode}
+				wrap_lines={gradio.props.wrap_lines}
+				show_line_numbers={gradio.props.show_line_numbers}
+				autocomplete={gradio.props.autocomplete}
+				readonly={!gradio.shared.interactive}
+				onblur={() => gradio.dispatch("blur")}
+				onfocus={() => gradio.dispatch("focus")}
+				oninput={() => gradio.dispatch("input")}
+			/>
+		{/if}
+	</div>
 </Block>

@@ -5,11 +5,11 @@
 
 	interface Props {
 		value: string;
+		copied?: boolean;
 	}
 
-	let { value }: Props = $props();
+	let { value, copied = $bindable(false) }: Props = $props();
 
-	let copied = $state(false);
 	let timer: NodeJS.Timeout;
 
 	function copy_feedback(): void {

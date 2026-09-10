@@ -379,6 +379,142 @@ describe("Copy button", () => {
 	);
 });
 
+describe("Toolbar visibility", () => {
+	afterEach(() => cleanup());
+
+	test("toolbar is hidden until the code block is hovered", async () => {
+		const { getByLabelText, getByTestId } = await render(Code, {
+			...default_props,
+			value: "my code"
+		});
+		const copy_button = getByLabelText("Copy");
+		expect(copy_button).toBeInTheDocument();
+		expect(copy_button).not.toBeVisible();
+
+		const container = getByTestId("code-container");
+		await fireEvent.mouseEnter(container);
+		await waitFor(() => expect(copy_button).toBeVisible());
+
+		await fireEvent.mouseLeave(container);
+		await waitFor(() => expect(copy_button).not.toBeVisible());
+	});
+
+	test("hovering the label region also reveals the toolbar (whole-block hover boundary)", async () => {
+		const { getByLabelText, getByText } = await render(Code, {
+			...default_props,
+			value: "my code",
+			show_label: true
+		});
+		const copy_button = getByLabelText("Copy");
+		expect(copy_button).not.toBeVisible();
+
+		// mouseenter doesn't natively bubble, so bubbles:true is passed to
+		// simulate the label being inside the same hover-boundary container as
+		// the toolbar/editor, rather than only the editor area triggering reveal.
+		const label_el = getByText(default_props.label);
+		await fireEvent.mouseEnter(label_el, { bubbles: true });
+		await waitFor(() => expect(copy_button).toBeVisible());
+	});
+
+	test("copy and download reveal together as a single toolbar, not independently", async () => {
+		const { getByLabelText, getByTestId } = await render(Code, {
+			...default_props,
+			value: "my code"
+		});
+		const copy_button = getByLabelText("Copy");
+		const download_link = getByLabelText("Download");
+		expect(copy_button).not.toBeVisible();
+		expect(download_link).not.toBeVisible();
+
+		const container = getByTestId("code-container");
+		await fireEvent.mouseEnter(container);
+		await waitFor(() => {
+			expect(copy_button).toBeVisible();
+			expect(download_link).toBeVisible();
+		});
+	});
+
+	test("toolbar reveals on keyboard focus and hides again on blur", async () => {
+		const { getByLabelText } = await render(Code, {
+			...default_props,
+			value: "my code"
+		});
+		const copy_button = getByLabelText("Copy");
+		expect(copy_button).not.toBeVisible();
+
+		copy_button.focus();
+		await waitFor(() => expect(copy_button).toBeVisible());
+
+		copy_button.blur();
+		await waitFor(() => expect(copy_button).not.toBeVisible());
+	});
+
+	test("toolbar stays visible through the copy-confirmation window after the pointer leaves", async () => {
+		// navigator.clipboard is unavailable in insecure (non-HTTPS) test origins,
+		// same workaround as the "Copy button" tests above.
+		Object.defineProperty(navigator, "clipboard", {
+			value: { writeText: vi.fn().mockResolvedValue(undefined) },
+			writable: true,
+			configurable: true
+		});
+
+		const { getByLabelText, getByTestId } = await render(Code, {
+			...default_props,
+			value: "my code"
+		});
+		const copy_button = getByLabelText("Copy");
+		const container = getByTestId("code-container");
+
+		await fireEvent.mouseEnter(container);
+		await waitFor(() => expect(copy_button).toBeVisible());
+		await fireEvent.click(copy_button);
+		await fireEvent.mouseLeave(container);
+
+		expect(copy_button).toBeVisible();
+		await waitFor(() => expect(copy_button).not.toBeVisible(), {
+			timeout: 3000
+		});
+	});
+
+	describe("on touch / coarse-pointer devices", () => {
+		afterEach(() => {
+			cleanup();
+			vi.unstubAllGlobals();
+		});
+
+		test("toolbar is always visible, with no hover or focus needed", async () => {
+			// Only the hover/pointer query is faked — CodeMirror's own internal
+			// matchMedia usage (e.g. print-media detection) must keep working,
+			// so every other query is delegated to the real implementation.
+			const real_matchMedia = window.matchMedia.bind(window);
+			vi.stubGlobal("matchMedia", (query: string) => {
+				if (query.includes("hover")) {
+					return {
+						matches: false,
+						media: query,
+						addListener: () => {},
+						removeListener: () => {},
+						addEventListener: () => {},
+						removeEventListener: () => {},
+						dispatchEvent: () => false
+					} as unknown as MediaQueryList;
+				}
+				return real_matchMedia(query);
+			});
+
+			const { getByLabelText } = await render(Code, {
+				...default_props,
+				value: "my code"
+			});
+			expect(getByLabelText("Copy")).toBeVisible();
+		});
+	});
+
+	test.todo(
+		"VISUAL: toolbar fades in/out over 0.15s when revealed/hidden — needs Playwright screenshot comparison"
+	);
+});
+
 describe("Download button", () => {
 	afterEach(() => cleanup());
 
